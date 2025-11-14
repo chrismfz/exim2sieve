@@ -1,0 +1,22 @@
+version: "2.2"
+filter:
+  - filtername: MoveCpanel
+    enabled: 1
+    rules:
+      - part: from
+        match: contains
+        val: "@cpanel.net"
+        opt: ""
+    actions:
+      - action: deliver
+        dest: "INBOX.cPanel"
+  - filtername: BlockSpamDomain
+    enabled: 1
+    rules:
+      - part: from
+        match: matches_regex
+        val: ".*@spamdomain\\.com"
+        opt: ""
+    actions:
+      - action: reject
+        dest: "Spam domain rejected"
