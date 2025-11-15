@@ -1,4 +1,4 @@
-module github.com/chrismfz/exim2sieve
+module exim2sieve
 
 go 1.24.6
 

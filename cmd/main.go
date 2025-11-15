@@ -1,113 +1,68 @@
 package main
 
 import (
-	"flag"
-	"fmt"
-	"io/ioutil"
-	"log"
-	"os"
-	"path/filepath"
+    "bytes"
+    "bufio"
+    "flag"
+    "fmt"
+    "io/ioutil"
+    "log"
+    "os"
+    "strings"
 
-	"gopkg.in/yaml.v3"
+    "gopkg.in/yaml.v3"
+
+    "exim2sieve/internal/cpanel"
+    "exim2sieve/internal/sieve"
 )
 
-type Filter struct {
-	Filter []struct {
-		Filtername string `yaml:"filtername"`
-		Enabled    int    `yaml:"enabled"`
-		Rules      []struct {
-			Part  string `yaml:"part"`
-			Match string `yaml:"match"`
-			Val   string `yaml:"val"`
-			Opt   string `yaml:"opt"`
-		} `yaml:"rules"`
-		Actions []struct {
-			Action string `yaml:"action"`
-			Dest   string `yaml:"dest"`
-		} `yaml:"actions"`
-	} `yaml:"filter"`
-	Version string `yaml:"version"`
-}
-
-
 func main() {
-    all := flag.Bool("all", false, "Scan all users")
-    account := flag.String("account", "", "Scan a specific account")
+    account := flag.String("account", "", "Alias for -cpanel-user (cPanel account)")
     dest := flag.String("dest", "./backup", "Destination folder for sieve scripts")
-    path := flag.String("path", "", "Load a single filter.yaml file (no cPanel environment required)")
+    path := flag.String("path", "", "Convert a single filter.yaml or filter file")
+    cpUser := flag.String("cpanel-user", "", "Export filters for a cPanel account (domains + mailboxes)")
 
     flag.Parse()
 
-    // 1️⃣ Αν δώθηκε --path, κάνουμε άμεσο import
+    // Make -account act as a shortcut for -cpanel-user
+    if *cpUser == "" && *account != "" {
+        *cpUser = *account
+    }
+
+    // If no mode flags are provided, show help and exit.
+    if *cpUser == "" && *path == "" {
+        fmt.Fprintf(os.Stderr, "exim2sieve – convert cPanel Exim filters to Sieve\n\n")
+        fmt.Fprintf(os.Stderr, "Usage:\n")
+        fmt.Fprintf(os.Stderr, "  %s [flags]\n\n", os.Args[0])
+        fmt.Fprintf(os.Stderr, "Modes (choose one):\n")
+        fmt.Fprintf(os.Stderr, "  -cpanel-user <user>   Export all filters for a cPanel account\n")
+        fmt.Fprintf(os.Stderr, "  -account <user>       Alias for -cpanel-user (same as above)\n")
+        fmt.Fprintf(os.Stderr, "  -path <file>          Convert a single filter.yaml or filter file\n\n")
+        fmt.Fprintf(os.Stderr, "Other flags:\n")
+        flag.PrintDefaults()
+        os.Exit(1)
+    }
+
+    // 0️⃣ Full cPanel user export (domains + mailboxes)
+    if *cpUser != "" {
+        if *path != "" {
+            log.Fatal("-cpanel-user/-account cannot be combined with -path")
+        }
+        if err := cpanel.ExportUser(*cpUser, *dest); err != nil {
+            log.Fatal(err)
+        }
+        return
+    }
+
+    // 1️⃣ Single file mode: demo / standalone
     if *path != "" {
         handleSingleFile(*path, *dest)
         return
     }
 
-    // 2️⃣ Χρειάζεται οπωσδήποτε --all ή --account
-    if !*all && *account == "" {
-        log.Fatal("You must specify --all or --account <name>")
-    }
-
-    var users []string
-    homeDir := "/home"
-
-    if *all {
-        files, err := ioutil.ReadDir(homeDir)
-        if err != nil {
-            log.Fatal(err)
-        }
-        for _, f := range files {
-            if f.IsDir() {
-                users = append(users, f.Name())
-            }
-        }
-    } else if *account != "" {
-        users = append(users, *account)
-    }
-
-    for _, u := range users {
-        filterPath := filepath.Join(homeDir, u, "etc", u, "filter.yaml")
-        if _, err := os.Stat(filterPath); os.IsNotExist(err) {
-            fmt.Printf("No filter.yaml for user %s\n", u)
-            continue
-        }
-
-        data, err := ioutil.ReadFile(filterPath)
-        if err != nil {
-            log.Println("Error reading filter.yaml:", err)
-            continue
-        }
-
-        var f Filter
-        if err := yaml.Unmarshal(data, &f); err != nil {
-            log.Println("YAML parse error:", err)
-            continue
-        }
-
-        // dump basic sieve
-        userDest := filepath.Join(*dest, u)
-        if err := os.MkdirAll(userDest, 0755); err != nil {
-            log.Println("Cannot create dest folder:", err)
-            continue
-        }
-
-        for _, rule := range f.Filter {
-            if rule.Enabled == 0 {
-                continue
-            }
-            sieveFile := filepath.Join(userDest, fmt.Sprintf("%s.sieve", rule.Filtername))
-            content := fmt.Sprintf("// sieve placeholder for filter %s\n", rule.Filtername)
-            err := ioutil.WriteFile(sieveFile, []byte(content), 0644)
-            if err != nil {
-                log.Println("Cannot write sieve file:", err)
-            }
-        }
-        fmt.Printf("Exported filters for user %s\n", u)
-    }
+    // Should never get here
+    log.Fatal("No valid mode selected (this should be unreachable)")
 }
-
-
 
 func handleSingleFile(path string, dest string) {
     data, err := ioutil.ReadFile(path)
@@ -115,25 +70,70 @@ func handleSingleFile(path string, dest string) {
         log.Fatalf("Cannot read file: %v\n", err)
     }
 
-    var f Filter
-    if err := yaml.Unmarshal(data, &f); err != nil {
-        log.Fatalf("YAML parse error: %v\n", err)
+    // Decide if this is YAML (filter.yaml) or text Exim filter ("filter")
+    if isYAML(data) {
+        var f sieve.Filter
+        if err := yaml.Unmarshal(data, &f); err != nil {
+            log.Fatalf("YAML parse error: %v\n", err)
+        }
+        scripts := sieve.ConvertFilters(f)
+        if len(scripts) == 0 {
+            log.Println("No enabled filters in YAML, nothing to export.")
+            return
+        }
+        combined := sieve.CombineScripts("filters", scripts)
+
+        if err := sieve.WriteScripts([]sieve.SieveScript{combined}, dest); err != nil {
+            log.Fatalf("Cannot write sieve scripts: %v\n", err)
+        }
+
+        fmt.Printf(
+            "Exported %d filters into %s/filters.sieve (YAML)\n",
+            len(scripts), dest,
+        )
+        return
     }
 
-    if err := os.MkdirAll(dest, 0755); err != nil {
-        log.Fatalf("Cannot create dest folder: %v\n", err)
+    // Text Exim filter mode
+    f, err := cpanel.ParseFilterFile(path)
+    if err != nil {
+        log.Fatalf("Cannot parse Exim filter: %v\n", err)
     }
 
-    for _, rule := range f.Filter {
-        if rule.Enabled == 0 {
+    scripts := sieve.ConvertFilters(f)
+    if len(scripts) == 0 {
+        log.Println("No enabled filters, nothing to export.")
+        return
+    }
+
+    // Single-file mode: also produce one combined filters.sieve
+    combined := sieve.CombineScripts("filters", scripts)
+
+    if err := sieve.WriteScripts([]sieve.SieveScript{combined}, dest); err != nil {
+        log.Fatalf("Cannot write sieve scripts: %v\n", err)
+    }
+
+    fmt.Printf(
+        "Exported %d filters into %s/filters.sieve\n",
+        len(scripts), dest,
+    )
+}
+
+// isYAML does a cheap detection whether the file looks like a cPanel YAML filter
+// (filter.yaml) instead of a plain Exim text filter ("filter").
+func isYAML(data []byte) bool {
+    scanner := bufio.NewScanner(bytes.NewReader(data))
+    for scanner.Scan() {
+        line := strings.TrimSpace(scanner.Text())
+        if line == "" || strings.HasPrefix(line, "#") {
             continue
         }
-        out := filepath.Join(dest, fmt.Sprintf("%s.sieve", rule.Filtername))
-        content := fmt.Sprintf("// sieve placeholder for filter %s\n", rule.Filtername)
-        if err := ioutil.WriteFile(out, []byte(content), 0644); err != nil {
-            log.Fatalf("Cannot write sieve file: %v\n", err)
+        if strings.HasPrefix(line, "---") ||
+            strings.HasPrefix(line, "version:") ||
+            strings.HasPrefix(line, "filter:") {
+            return true
         }
+        break
     }
-
-    fmt.Printf("Exported %d filters to %s\n", len(f.Filter), dest)
+    return false
 }
