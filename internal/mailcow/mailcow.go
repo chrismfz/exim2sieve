@@ -24,6 +24,37 @@ type Client struct {
 	http    *http.Client
 }
 
+
+// mailcowAPIResponse models the standard Mailcow API response:
+// [
+//   {
+//     "type": "success" | "danger" | "error",
+//     "msg":  ["something", "detail"],
+//     "log":  [...]
+//   }
+// ]
+type mailcowAPIResponse struct {
+        Type string            `json:"type"`
+        Msg  []string          `json:"msg"`
+        Log  json.RawMessage   `json:"log"`
+}
+
+func parseMailcowResponse(body []byte) (*mailcowAPIResponse, error) {
+        var arr []mailcowAPIResponse
+        if err := json.Unmarshal(body, &arr); err != nil {
+            // Not fatal – Mailcow sometimes changes formats; caller can
+            // still fall back to raw body.
+            return nil, err
+        }
+        if len(arr) == 0 {
+            return nil, nil
+        }
+        return &arr[0], nil
+}
+
+
+
+
 func NewClientFromConfig(cfg *config.Config) (*Client, error) {
 	if cfg.MailcowAPIURL == "" || cfg.MailcowAPIKey == "" {
 		return nil, fmt.Errorf("mailcow api_url or api_key not configured")
@@ -44,31 +75,95 @@ func NewClientFromConfig(cfg *config.Config) (*Client, error) {
 func (c *Client) EnsureDomain(domain string) error {
 	endpoint := c.apiURL + "/add/domain"
 
-	payload := map[string]interface{}{
-		"domain":   domain,
-		"active":   "1",
-		"backupmx": "0",
-		// Keep quotas mostly unlimited / default – can be tuned later.
-		"max_quota":   "0",
-		"max_mailboxes": "0",
-		"def_quota":   fmt.Sprintf("%d", c.quotaMB),
-		"quota":       "0",
-	}
+        // We'll give the domain a very large quota so default mailbox
+        // quotas never exceed the domain quota.
+        baseDomainQuota := c.quotaMB * 100 // e.g. 10GB user → 1TB domain
 
-	respBody, status, err := c.postJSON(endpoint, payload)
-	if err != nil {
-		return fmt.Errorf("EnsureDomain %s: %w", domain, err)
-	}
+        makePayload := func(quotaMB int) map[string]interface{} {
+                return map[string]interface{}{
+                        "domain":    domain,
+                        "active":    "1",
+                        "backupmx":  "0",
+                        // Use documented field names (no underscores):
+                       // defquota: default mailbox size
+                        // maxquota, quota: per-mailbox and total domain quota
+                        "defquota":  fmt.Sprintf("%d", c.quotaMB),
+                        "quota":     fmt.Sprintf("%d", quotaMB),
+                        "maxquota":  fmt.Sprintf("%d", quotaMB),
+                        "mailboxes": "0",
+                        "aliases":   "400",
+                }
+        }
 
-	if status/100 != 2 {
-		// Mailcow often returns messages like "Domain already exists"
-		// in the body; log but don't fail hard.
-		log.Printf("mailcow: add/domain %s returned HTTP %d: %s", domain, status, string(respBody))
-		return nil
-	}
+        tryOnce := func(quotaMB int) (*mailcowAPIResponse, []byte, int, error) {
+                body, status, err := c.postJSON(endpoint, makePayload(quotaMB))
+                if err != nil {
+                        return nil, body, status, fmt.Errorf("EnsureDomain %s: %w", domain, err)
+                }
+                if status/100 != 2 {
+                        return nil, body, status, fmt.Errorf("EnsureDomain %s: HTTP %d: %s", domain, status, string(body))
+                }
+                resp, _ := parseMailcowResponse(body)
+                return resp, body, status, nil
+        }
 
-	return nil
+        resp, body, _, err := tryOnce(baseDomainQuota)
+        if err != nil {
+                // HTTP-level or network error
+                return err
+        }
+
+        if resp == nil || resp.Type == "" {
+                // Unknown format but HTTP 200 – assume ok, just log raw.
+                log.Printf("mailcow: add/domain %s raw response: %s", domain, string(body))
+                return nil
+        }
+
+        msgJoined := strings.Join(resp.Msg, ",")
+
+        switch resp.Type {
+        case "success":
+                log.Printf("mailcow: domain %s created/updated (msg=%s)", domain, msgJoined)
+                return nil
+        case "danger", "error":
+                // Allow "already exists" semantics to pass.
+                if strings.Contains(msgJoined, "exist") {
+                        log.Printf("mailcow: domain %s already exists (%s)", domain, msgJoined)
+                        return nil
+                }
+                // Special-case: mailbox_quota_exceeds_domain_quota
+                if strings.Contains(msgJoined, "mailbox_quota_exceeds_domain_quota") {
+                        bigQuota := baseDomainQuota * 10
+                        log.Printf("mailcow: domain %s quota too low (%s), retrying with quota=%dMB",
+                                domain, msgJoined, bigQuota)
+                        resp2, body2, _, err2 := tryOnce(bigQuota)
+                        if err2 != nil {
+                                return fmt.Errorf("EnsureDomain %s retry failed: %w", domain, err2)
+                        }
+                        if resp2 == nil || resp2.Type == "" {
+                                log.Printf("mailcow: domain %s ensured after retry (raw=%s)", domain, string(body2))
+                                return nil
+                        }
+                        msgJoined2 := strings.Join(resp2.Msg, ",")
+                        if resp2.Type == "success" || strings.Contains(msgJoined2, "exist") {
+                                log.Printf("mailcow: domain %s ensured after retry (msg=%s)", domain, msgJoined2)
+                                return nil
+                        }
+                        return fmt.Errorf("EnsureDomain %s retry failed: type=%s msg=%s body=%s",
+                                domain, resp2.Type, msgJoined2, string(body2))
+                }
+                return fmt.Errorf("EnsureDomain %s failed: type=%s msg=%s body=%s",
+                        domain, resp.Type, msgJoined, string(body))
+        default:
+                // Unexpected type, but don't fail hard.
+                log.Printf("mailcow: add/domain %s returned unknown type=%s msg=%s body=%s",
+                        domain, resp.Type, msgJoined, string(body))
+                return nil
+        }
+
 }
+
+
 
 // CreateMailbox creates a mailbox via mailcow API.
 // It does NOT treat "already exists" specially — that will appear
@@ -98,12 +193,38 @@ func (c *Client) CreateMailbox(localPart, domain, name, password string) error {
 		return fmt.Errorf("CreateMailbox %s@%s: %w", localPart, domain, err)
 	}
 
-	if status/100 != 2 {
-		// Log body so we can see "mailbox exists" or other errors.
-		return fmt.Errorf("CreateMailbox %s@%s: HTTP %d: %s", localPart, domain, status, string(respBody))
-	}
+        if status/100 != 2 {
+                // HTTP-level error
+                return fmt.Errorf("CreateMailbox %s@%s: HTTP %d: %s", localPart, domain, status, string(respBody))
+        }
 
-	return nil
+        resp, _ := parseMailcowResponse(respBody)
+        if resp == nil || resp.Type == "" {
+                // Unknown body, treat HTTP 200 as success but log raw.
+                log.Printf("mailcow: add/mailbox %s@%s raw response: %s", localPart, domain, string(respBody))
+                return nil
+        }
+
+        msgJoined := strings.Join(resp.Msg, ",")
+
+        switch resp.Type {
+        case "success":
+                return nil
+        case "danger", "error":
+                // Allow "already exists" semantics for idempotency.
+                if strings.Contains(msgJoined, "exist") {
+                        log.Printf("mailcow: mailbox %s@%s already exists (%s)", localPart, domain, msgJoined)
+                        return nil
+                }
+                return fmt.Errorf("CreateMailbox %s@%s failed: type=%s msg=%s body=%s",
+                        localPart, domain, resp.Type, msgJoined, string(respBody))
+        default:
+                log.Printf("mailcow: add/mailbox %s@%s returned unknown type=%s msg=%s body=%s",
+                        localPart, domain, resp.Type, msgJoined, string(respBody))
+                return nil
+        }
+
+
 }
 
 func (c *Client) postJSON(url string, payload interface{}) ([]byte, int, error) {
@@ -240,7 +361,10 @@ func CreateMailboxesFromBackup(c *Client, backupRoot, domainFilter string, logWr
 				continue
 			}
 
-			logger.Printf("mailcow: created mailbox %s (quota=%dMB)", email, c.quotaMB)
+                        // Log to stdout with full details (including password)
+                        logger.Printf("mailcow: created mailbox %s (quota=%dMB, password=%s)", email, c.quotaMB, pw)
+
+                        // And also log to the mailbox password log file
 			pwLogger.Printf("%s; %s; %s; %s; %s",
 				time.Now().UTC().Format(time.RFC3339),
 				domain,
