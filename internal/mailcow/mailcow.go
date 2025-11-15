@@ -25,34 +25,6 @@ type Client struct {
 }
 
 
-// mailcowAPIResponse models the standard Mailcow API response:
-// [
-//   {
-//     "type": "success" | "danger" | "error",
-//     "msg":  ["something", "detail"],
-//     "log":  [...]
-//   }
-// ]
-type mailcowAPIResponse struct {
-        Type string            `json:"type"`
-        Msg  []string          `json:"msg"`
-        Log  json.RawMessage   `json:"log"`
-}
-
-func parseMailcowResponse(body []byte) (*mailcowAPIResponse, error) {
-        var arr []mailcowAPIResponse
-        if err := json.Unmarshal(body, &arr); err != nil {
-            // Not fatal – Mailcow sometimes changes formats; caller can
-            // still fall back to raw body.
-            return nil, err
-        }
-        if len(arr) == 0 {
-            return nil, nil
-        }
-        return &arr[0], nil
-}
-
-
 
 
 func NewClientFromConfig(cfg *config.Config) (*Client, error) {
@@ -70,96 +42,107 @@ func NewClientFromConfig(cfg *config.Config) (*Client, error) {
 	}, nil
 }
 
+
+// apiResponseItem represents a single Mailcow JSON reply object
+// e.g. [{"type":"success","msg":["domain_added","example.org"], ...}]
+type apiResponseItem struct {
+        Type string        `json:"type"`
+        Msg  []interface{} `json:"msg"`
+}
+
+func parseMailcowResponse(body []byte) (*apiResponseItem, error) {
+        var arr []apiResponseItem
+        if err := json.Unmarshal(body, &arr); err != nil {
+            return nil, err
+        }
+        if len(arr) == 0 {
+            return nil, fmt.Errorf("empty response")
+        }
+        return &arr[0], nil
+}
+
+func joinMsg(msg []interface{}) string {
+        if len(msg) == 0 {
+                return ""
+        }
+        parts := make([]string, 0, len(msg))
+        for _, m := range msg {
+                parts = append(parts, fmt.Sprint(m))
+        }
+        return strings.Join(parts, ",")
+}
+
+
+
+
+
 // EnsureDomain tries to create the domain. If it already exists,
 // we just log and continue.
 func (c *Client) EnsureDomain(domain string) error {
 	endpoint := c.apiURL + "/add/domain"
 
-        // We'll give the domain a very large quota so default mailbox
-        // quotas never exceed the domain quota.
-        baseDomainQuota := c.quotaMB * 100 // e.g. 10GB user → 1TB domain
 
-        makePayload := func(quotaMB int) map[string]interface{} {
-                return map[string]interface{}{
-                        "domain":    domain,
-                        "active":    "1",
-                        "backupmx":  "0",
-                        // Use documented field names (no underscores):
-                       // defquota: default mailbox size
-                        // maxquota, quota: per-mailbox and total domain quota
-                        "defquota":  fmt.Sprintf("%d", c.quotaMB),
-                        "quota":     fmt.Sprintf("%d", quotaMB),
-                        "maxquota":  fmt.Sprintf("%d", quotaMB),
-                        "mailboxes": "0",
-                        "aliases":   "400",
-                }
+        // big enough quota so that per-mailbox quotas never exceed domain quota
+        domainQuota := c.quotaMB * 100 // e.g. 10 GB per user → 1 TB domain
+
+        payload := map[string]interface{}{
+                "domain":               domain,
+                "description":          fmt.Sprintf("Imported from cPanel by exim2sieve for %s", domain),
+                "aliases":              "400",
+                "mailboxes":            "0", // 0 = unlimited in Mailcow
+                "defquota":             fmt.Sprintf("%d", c.quotaMB),  // default mailbox quota (MB)
+                "maxquota":             fmt.Sprintf("%d", c.quotaMB),  // max quota per mailbox (MB)
+                "quota":                fmt.Sprintf("%d", domainQuota),// total domain quota (MB)
+                "active":               "1",
+                "rl_value":             "0",  // no rate-limit by default
+                "rl_frame":             "s",  // per second (if rl_value > 0)
+                "backupmx":             "0",
+                "relay_all_recipients": "0",
+                "restart_sogo":         "1",
         }
 
-        tryOnce := func(quotaMB int) (*mailcowAPIResponse, []byte, int, error) {
-                body, status, err := c.postJSON(endpoint, makePayload(quotaMB))
-                if err != nil {
-                        return nil, body, status, fmt.Errorf("EnsureDomain %s: %w", domain, err)
-                }
-                if status/100 != 2 {
-                        return nil, body, status, fmt.Errorf("EnsureDomain %s: HTTP %d: %s", domain, status, string(body))
-                }
-                resp, _ := parseMailcowResponse(body)
-                return resp, body, status, nil
-        }
-
-        resp, body, _, err := tryOnce(baseDomainQuota)
+        body, status, err := c.postJSON(endpoint, payload)
         if err != nil {
-                // HTTP-level or network error
-                return err
+                return fmt.Errorf("EnsureDomain %s: %w", domain, err)
         }
 
-        if resp == nil || resp.Type == "" {
-                // Unknown format but HTTP 200 – assume ok, just log raw.
+        // HTTP-level error
+        if status/100 != 2 {
+                return fmt.Errorf("EnsureDomain %s: HTTP %d: %s", domain, status, string(body))
+        }
+
+        resp, perr := parseMailcowResponse(body)
+        if perr != nil || resp == nil || resp.Type == "" {
+                // Unknown / changed format – assume ok, but log raw
                 log.Printf("mailcow: add/domain %s raw response: %s", domain, string(body))
                 return nil
         }
 
-        msgJoined := strings.Join(resp.Msg, ",")
+        msgJoined := joinMsg(resp.Msg)
 
         switch resp.Type {
         case "success":
                 log.Printf("mailcow: domain %s created/updated (msg=%s)", domain, msgJoined)
                 return nil
         case "danger", "error":
-                // Allow "already exists" semantics to pass.
                 if strings.Contains(msgJoined, "exist") {
                         log.Printf("mailcow: domain %s already exists (%s)", domain, msgJoined)
                         return nil
                 }
-                // Special-case: mailbox_quota_exceeds_domain_quota
                 if strings.Contains(msgJoined, "mailbox_quota_exceeds_domain_quota") {
-                        bigQuota := baseDomainQuota * 10
-                        log.Printf("mailcow: domain %s quota too low (%s), retrying with quota=%dMB",
-                                domain, msgJoined, bigQuota)
-                        resp2, body2, _, err2 := tryOnce(bigQuota)
-                        if err2 != nil {
-                                return fmt.Errorf("EnsureDomain %s retry failed: %w", domain, err2)
-                        }
-                        if resp2 == nil || resp2.Type == "" {
-                                log.Printf("mailcow: domain %s ensured after retry (raw=%s)", domain, string(body2))
-                                return nil
-                        }
-                        msgJoined2 := strings.Join(resp2.Msg, ",")
-                        if resp2.Type == "success" || strings.Contains(msgJoined2, "exist") {
-                                log.Printf("mailcow: domain %s ensured after retry (msg=%s)", domain, msgJoined2)
-                                return nil
-                        }
-                        return fmt.Errorf("EnsureDomain %s retry failed: type=%s msg=%s body=%s",
-                                domain, resp2.Type, msgJoined2, string(body2))
+                        // If ποτέ το καταφέρουμε να το χτυπήσουμε, ο admin
+                        // μπορεί απλά να μεγαλώσει τα quota από το UI.
+                        return fmt.Errorf("EnsureDomain %s failed (quota too low): msg=%s body=%s",
+                                domain, msgJoined, string(body))
                 }
                 return fmt.Errorf("EnsureDomain %s failed: type=%s msg=%s body=%s",
                         domain, resp.Type, msgJoined, string(body))
         default:
-                // Unexpected type, but don't fail hard.
                 log.Printf("mailcow: add/domain %s returned unknown type=%s msg=%s body=%s",
                         domain, resp.Type, msgJoined, string(body))
                 return nil
         }
+
 
 }
 
@@ -205,7 +188,7 @@ func (c *Client) CreateMailbox(localPart, domain, name, password string) error {
                 return nil
         }
 
-        msgJoined := strings.Join(resp.Msg, ",")
+        msgJoined := joinMsg(resp.Msg)
 
         switch resp.Type {
         case "success":
