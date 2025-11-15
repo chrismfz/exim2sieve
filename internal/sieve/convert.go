@@ -24,7 +24,7 @@ func ConvertFilters(f Filter) []SieveScript {
 
         // ── Build combined condition from all rules ────────────────────────
 if len(flt.Rules) == 0 {
-    sb.WriteString("// Filter has no rules; nothing to match.\n")
+    sb.WriteString(" # Filter has no rules; nothing to match.\n")
 
     content := sb.String()
 
@@ -33,13 +33,13 @@ if len(flt.Rules) == 0 {
     if flt.Enabled == 0 {
         var commentedLines []string
         commentedLines = append(commentedLines,
-            fmt.Sprintf("// NOTE: this filter was disabled in cPanel (enabled=%d)", flt.Enabled),
+            fmt.Sprintf("# NOTE: this filter was disabled in cPanel (enabled=%d)", flt.Enabled),
         )
         for _, line := range strings.Split(content, "\n") {
             if strings.TrimSpace(line) == "" {
                 commentedLines = append(commentedLines, "")
             } else {
-                commentedLines = append(commentedLines, "// "+line)
+                commentedLines = append(commentedLines, "# "+line)
             }
         }
         content = strings.Join(commentedLines, "\n")
@@ -128,13 +128,13 @@ content := sb.String()
 if flt.Enabled == 0 {
     var commentedLines []string
     commentedLines = append(commentedLines,
-        fmt.Sprintf("// NOTE: this filter was disabled in cPanel (enabled=%d)", flt.Enabled),
+        fmt.Sprintf("# NOTE: this filter was disabled in cPanel (enabled=%d)", flt.Enabled),
     )
     for _, line := range strings.Split(content, "\n") {
         if strings.TrimSpace(line) == "" {
             commentedLines = append(commentedLines, "")
         } else {
-            commentedLines = append(commentedLines, "// "+line)
+            commentedLines = append(commentedLines, "# "+line)
         }
     }
     content = strings.Join(commentedLines, "\n")

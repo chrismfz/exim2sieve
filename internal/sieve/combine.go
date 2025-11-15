@@ -48,7 +48,7 @@ func CombineScripts(name string, scripts []SieveScript) SieveScript {
             continue
         }
 
-        bodyChunks = append(bodyChunks, fmt.Sprintf("// Filter: %s", sc.Name))
+        bodyChunks = append(bodyChunks, fmt.Sprintf("# Filter: %s", sc.Name))
         bodyChunks = append(bodyChunks, content)
         bodyChunks = append(bodyChunks, "") // blank line between filters
     }
