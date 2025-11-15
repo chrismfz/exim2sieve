@@ -89,7 +89,7 @@ func (c *Client) EnsureDomain(domain string) error {
                 "domain":               domain,
                 "description":          fmt.Sprintf("Imported from cPanel by exim2sieve for %s", domain),
                 "aliases":              "400",
-                "mailboxes":            "0", // 0 = unlimited in Mailcow
+                "mailboxes":            "100", // 0 doesnt means unlimited ffs mailcow
                 "defquota":             fmt.Sprintf("%d", c.quotaMB),  // default mailbox quota (MB)
                 "maxquota":             fmt.Sprintf("%d", c.quotaMB),  // max quota per mailbox (MB)
                 "quota":                fmt.Sprintf("%d", domainQuota),// total domain quota (MB)
