@@ -14,6 +14,8 @@ import (
 
     "exim2sieve/internal/cpanel"
     "exim2sieve/internal/sieve"
+    "exim2sieve/internal/config"
+    "exim2sieve/internal/importer"
 )
 
 func main() {
@@ -22,6 +24,12 @@ func main() {
     path := flag.String("path", "", "Convert a single filter.yaml or filter file")
     cpUser := flag.String("cpanel-user", "", "Export filters for a cPanel account (domains + mailboxes)")
 
+    // Import-related flags
+    importSieve := flag.Bool("import-sieve", false, "Import Sieve scripts from a backup using doveadm")
+    backupRoot := flag.String("backup", "", "Backup root for -import-sieve (e.g. ./backup/myipgr)")
+    domain := flag.String("domain", "", "Limit -import-sieve to a specific domain (optional)")
+    configPath := flag.String("config", "", "Path to exim2sieve.conf (optional)")
+
     flag.Parse()
 
     // Make -account act as a shortcut for -cpanel-user
@@ -29,23 +37,74 @@ func main() {
         *cpUser = *account
     }
 
+    // Decide mode
+    modeExportUser := (*cpUser != "")
+    modeSingleFile := (*path != "")
+    modeImport := *importSieve
+
     // If no mode flags are provided, show help and exit.
-    if *cpUser == "" && *path == "" {
+    if !modeExportUser && !modeSingleFile && !modeImport {
         fmt.Fprintf(os.Stderr, "exim2sieve – convert cPanel Exim filters to Sieve\n\n")
         fmt.Fprintf(os.Stderr, "Usage:\n")
         fmt.Fprintf(os.Stderr, "  %s [flags]\n\n", os.Args[0])
         fmt.Fprintf(os.Stderr, "Modes (choose one):\n")
         fmt.Fprintf(os.Stderr, "  -cpanel-user <user>   Export all filters for a cPanel account\n")
         fmt.Fprintf(os.Stderr, "  -account <user>       Alias for -cpanel-user (same as above)\n")
-        fmt.Fprintf(os.Stderr, "  -path <file>          Convert a single filter.yaml or filter file\n\n")
+        fmt.Fprintf(os.Stderr, "  -path <file>          Convert a single filter.yaml or filter file\n")
+        fmt.Fprintf(os.Stderr, "  -import-sieve         Import Sieve scripts from a backup using doveadm\n\n")
+
+        fmt.Fprintf(os.Stderr, "Export example:\n")
+        fmt.Fprintf(os.Stderr, "./exim2sieve -cpanel-user myipgr -dest ./backup\n")
+        fmt.Fprintf(os.Stderr, "Import example:\n")
+        fmt.Fprintf(os.Stderr, "./exim2sieve -config exim2sieve.conf  -import-sieve -backup ./backup/myipgr -domain myip.gr \n")
+
+
+
         fmt.Fprintf(os.Stderr, "Other flags:\n")
         flag.PrintDefaults()
         os.Exit(1)
     }
 
-    // 0️⃣ Full cPanel user export (domains + mailboxes)
-    if *cpUser != "" {
-        if *path != "" {
+    // Ensure modes are not mixed
+    activeModes := 0
+    if modeExportUser {
+        activeModes++
+    }
+    if modeSingleFile {
+        activeModes++
+    }
+    if modeImport {
+        activeModes++
+    }
+    if activeModes > 1 {
+        log.Fatal("Only one of -cpanel-user/-account, -path, or -import-sieve can be used at a time")
+    }
+
+    // 0️⃣ Import mode: use doveadm to load Sieve into Dovecot
+    if modeImport {
+        if *backupRoot == "" {
+            log.Fatal("-backup is required with -import-sieve")
+        }
+        cfg, err := config.Load(*configPath)
+        if err != nil {
+            log.Fatalf("Cannot load config: %v", err)
+        }
+
+        ic := importer.ImportConfig{
+            BackupRoot: *backupRoot,
+            Domain:     *domain,
+            DoveadmCmd: cfg.DoveadmCmd,
+        }
+
+        if err := importer.ImportSieve(ic); err != nil {
+            log.Fatal(err)
+        }
+        return
+    }
+
+    // 1️⃣ Full cPanel user export (domains + mailboxes)
+    if modeExportUser {
+        if modeSingleFile {
             log.Fatal("-cpanel-user/-account cannot be combined with -path")
         }
         if err := cpanel.ExportUser(*cpUser, *dest); err != nil {
@@ -54,8 +113,8 @@ func main() {
         return
     }
 
-    // 1️⃣ Single file mode: demo / standalone
-    if *path != "" {
+    // 2️⃣ Single file mode: demo / standalone
+    if modeSingleFile {
         handleSingleFile(*path, *dest)
         return
     }
