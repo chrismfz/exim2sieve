@@ -4,12 +4,21 @@ import (
     "bufio"
     "fmt"
     "os"
-    "path/filepath"
     "strings"
+    "strconv"
+
 )
 
 type Config struct {
-    DoveadmCmd []string // e.g. {"doveadm"} or {"docker", "exec", "-i", "...", "doveadm"}
+
+    DoveadmCmd    []string // e.g. {"doveadm"} or {"docker", "exec", "-i", "...", "doveadm"}
+
+    // Mailcow API integration (optional, used by mailcow-related modes)
+    MailcowAPIURL  string
+    MailcowAPIKey  string
+    MailcowQuotaMB int // default quota per mailbox in MB
+
+
 }
 
 // Load tries an explicit path (if given), then ./exim2sieve.conf, then
@@ -32,6 +41,7 @@ func Load(path string) (*Config, error) {
 
     for _, p := range candidates {
         cfg, err := loadFrom(p)
+
         if err == nil {
             return cfg, nil
         }
@@ -40,11 +50,14 @@ func Load(path string) (*Config, error) {
         }
         // For other errors (permission, parse, etc.) return immediately.
         return nil, err
+
+
     }
 
     // Fallback: assume plain "doveadm" in PATH.
     return &Config{
         DoveadmCmd: []string{"doveadm"},
+        MailcowQuotaMB: 5120, // 5GB default
     }, nil
 }
 
@@ -56,8 +69,12 @@ func loadFrom(path string) (*Config, error) {
     defer f.Close()
 
     scanner := bufio.NewScanner(f)
-    inDoveadm := false
-    var cmdLine string
+    cfg := &Config{
+        DoveadmCmd:    []string{"doveadm"},
+        MailcowQuotaMB: 5120, // sensible default
+    }
+
+    currentSection := ""
 
     for scanner.Scan() {
         line := strings.TrimSpace(scanner.Text())
@@ -65,42 +82,81 @@ func loadFrom(path string) (*Config, error) {
             continue
         }
 
-        // section headers: [doveadm]
+        // section headers: [doveadm], [mailcow]
         if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-            section := strings.ToLower(strings.TrimSpace(line[1 : len(line)-1]))
-            inDoveadm = (section == "doveadm")
+            currentSection = strings.ToLower(strings.TrimSpace(line[1 : len(line)-1]))
             continue
         }
 
-        if !inDoveadm {
-            continue
-        }
+
 
         // key = value
-        if idx := strings.Index(line, "="); idx != -1 {
-            key := strings.ToLower(strings.TrimSpace(line[:idx]))
-            val := strings.TrimSpace(line[idx+1:])
-            if key == "command" {
-                cmdLine = val
-                break
+        idx := strings.Index(line, "=")
+        if idx == -1 {
+            continue
+        }
+        key := strings.ToLower(strings.TrimSpace(line[:idx]))
+        val := strings.TrimSpace(line[idx+1:])
+
+        switch currentSection {
+        case "doveadm":
+            if key == "command" && val != "" {
+                parts := strings.Fields(val)
+                if len(parts) > 0 {
+                    cfg.DoveadmCmd = parts
+                }
+            }
+        case "mailcow":
+            switch key {
+            case "api_url":
+                cfg.MailcowAPIURL = strings.TrimRight(val, "/")
+            case "api_key":
+                cfg.MailcowAPIKey = val
+            case "default_quota":
+                if mb, err := parseQuotaMB(val); err == nil {
+                    cfg.MailcowQuotaMB = mb
+                }
             }
         }
     }
 
     if err := scanner.Err(); err != nil {
-        return nil, fmt.Errorf("reading config %s: %w", filepath.Base(path), err)
+        return nil, fmt.Errorf("reading config %s: %w", path, err)
     }
 
-    if cmdLine == "" {
-        return nil, fmt.Errorf("no [doveadm].command found in %s", path)
+    // No strict requirement for [doveadm] or [mailcow] – defaults are fine.
+    return cfg, nil
+}
+
+// parseQuotaMB parses things like:
+//   "3072", "5GB", "10G", "500MB", "500M"
+// and returns MB (which is what mailcow wants for quota).
+func parseQuotaMB(val string) (int, error) {
+    s := strings.ToUpper(strings.TrimSpace(val))
+    if s == "" {
+        return 0, fmt.Errorf("empty quota")
     }
 
-    parts := strings.Fields(cmdLine)
-    if len(parts) == 0 {
-        return nil, fmt.Errorf("empty doveadm command in %s", path)
+    mult := 1
+    switch {
+    case strings.HasSuffix(s, "GB"):
+        mult = 1024
+        s = strings.TrimSuffix(s, "GB")
+    case strings.HasSuffix(s, "G"):
+        mult = 1024
+        s = strings.TrimSuffix(s, "G")
+    case strings.HasSuffix(s, "MB"):
+        mult = 1
+        s = strings.TrimSuffix(s, "MB")
+    case strings.HasSuffix(s, "M"):
+        mult = 1
+        s = strings.TrimSuffix(s, "M")
     }
 
-    return &Config{
-        DoveadmCmd: parts,
-    }, nil
+    s = strings.TrimSpace(s)
+    n, err := strconv.Atoi(s)
+    if err != nil {
+        return 0, fmt.Errorf("parseQuotaMB(%q): %w", val, err)
+    }
+    return n * mult, nil
 }

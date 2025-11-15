@@ -16,6 +16,8 @@ import (
     "exim2sieve/internal/sieve"
     "exim2sieve/internal/config"
     "exim2sieve/internal/importer"
+    "exim2sieve/internal/mailcow"
+
 )
 
 func main() {
@@ -30,6 +32,9 @@ func main() {
     domain := flag.String("domain", "", "Limit -import-sieve to a specific domain (optional)")
     configPath := flag.String("config", "", "Path to exim2sieve.conf (optional)")
 
+    // Mailcow-related flags (mailbox creation via API)
+    createMailcow := flag.Bool("create-mailcow-mailboxes", false,
+        "Create mailcow mailboxes from a backup tree (uses [mailcow] config)")
     flag.Parse()
 
     // Make -account act as a shortcut for -cpanel-user
@@ -41,9 +46,11 @@ func main() {
     modeExportUser := (*cpUser != "")
     modeSingleFile := (*path != "")
     modeImport := *importSieve
+    modeMailcow := *createMailcow
+
 
     // If no mode flags are provided, show help and exit.
-    if !modeExportUser && !modeSingleFile && !modeImport {
+    if !modeExportUser && !modeSingleFile && !modeImport && !modeMailcow {
         fmt.Fprintf(os.Stderr, "exim2sieve – convert cPanel Exim filters to Sieve\n\n")
         fmt.Fprintf(os.Stderr, "Usage:\n")
         fmt.Fprintf(os.Stderr, "  %s [flags]\n\n", os.Args[0])
@@ -52,11 +59,14 @@ func main() {
         fmt.Fprintf(os.Stderr, "  -account <user>       Alias for -cpanel-user (same as above)\n")
         fmt.Fprintf(os.Stderr, "  -path <file>          Convert a single filter.yaml or filter file\n")
         fmt.Fprintf(os.Stderr, "  -import-sieve         Import Sieve scripts from a backup using doveadm\n\n")
+        fmt.Fprintf(os.Stderr, "  -create-mailcow-mailboxes   Create mailcow mailboxes from a backup tree\n\n")
 
         fmt.Fprintf(os.Stderr, "Export example:\n")
         fmt.Fprintf(os.Stderr, "./exim2sieve -cpanel-user myipgr -dest ./backup\n")
         fmt.Fprintf(os.Stderr, "Import example:\n")
         fmt.Fprintf(os.Stderr, "./exim2sieve -config exim2sieve.conf  -import-sieve -backup ./backup/myipgr -domain myip.gr \n")
+        fmt.Fprintf(os.Stderr, "Mailcow mailboxes example:\n")
+        fmt.Fprintf(os.Stderr, "./exim2sieve -config exim2sieve.conf -create-mailcow-mailboxes -backup ./backup/myipgr -domain myip.gr\n")
 
 
 
@@ -73,14 +83,20 @@ func main() {
     if modeSingleFile {
         activeModes++
     }
+
     if modeImport {
         activeModes++
     }
+
+    if modeMailcow {
+        activeModes++
+    }
+
     if activeModes > 1 {
         log.Fatal("Only one of -cpanel-user/-account, -path, or -import-sieve can be used at a time")
     }
 
-    // 0️⃣ Import mode: use doveadm to load Sieve into Dovecot
+    //  Import mode: use doveadm to load Sieve into Dovecot
     if modeImport {
         if *backupRoot == "" {
             log.Fatal("-backup is required with -import-sieve")
@@ -102,7 +118,35 @@ func main() {
         return
     }
 
-    // 1️⃣ Full cPanel user export (domains + mailboxes)
+
+    //  Mailcow mailbox creation mode (API only, no sieve import here)
+    if modeMailcow {
+        if *backupRoot == "" {
+            log.Fatal("-backup is required with -create-mailcow-mailboxes")
+        }
+
+        cfg, err := config.Load(*configPath)
+        if err != nil {
+            log.Fatalf("Cannot load config: %v", err)
+        }
+
+        client, err := mailcow.NewClientFromConfig(cfg)
+        if err != nil {
+            log.Fatalf("mailcow client: %v", err)
+        }
+
+        if err := mailcow.CreateMailboxesFromBackup(client, *backupRoot, *domain, nil); err != nil {
+            log.Fatal(err)
+        }
+        return
+    }
+
+
+
+
+
+
+    //  Full cPanel user export (domains + mailboxes)
     if modeExportUser {
         if modeSingleFile {
             log.Fatal("-cpanel-user/-account cannot be combined with -path")
@@ -113,7 +157,7 @@ func main() {
         return
     }
 
-    // 2️⃣ Single file mode: demo / standalone
+    //  Single file mode: demo / standalone
     if modeSingleFile {
         handleSingleFile(*path, *dest)
         return
