@@ -17,23 +17,42 @@ func ConvertFilters(f Filter) []SieveScript {
     var scripts []SieveScript
 
     for _, flt := range f.Filter {
-        if flt.Enabled == 0 {
-            continue
-        }
 
         var sb strings.Builder
         usedExt := map[string]bool{}
         usesBody := false
 
         // ── Build combined condition from all rules ────────────────────────
-        if len(flt.Rules) == 0 {
-            sb.WriteString("// Filter has no rules; nothing to match.\n")
-            scripts = append(scripts, SieveScript{
-                Name:    flt.Filtername,
-                Content: sb.String(),
-            })
-            continue
+if len(flt.Rules) == 0 {
+    sb.WriteString("// Filter has no rules; nothing to match.\n")
+
+    content := sb.String()
+
+    // If the filter was disabled in cPanel, keep it but comment it out
+    // so it does not run on the target system.
+    if flt.Enabled == 0 {
+        var commentedLines []string
+        commentedLines = append(commentedLines,
+            fmt.Sprintf("// NOTE: this filter was disabled in cPanel (enabled=%d)", flt.Enabled),
+        )
+        for _, line := range strings.Split(content, "\n") {
+            if strings.TrimSpace(line) == "" {
+                commentedLines = append(commentedLines, "")
+            } else {
+                commentedLines = append(commentedLines, "// "+line)
+            }
         }
+        content = strings.Join(commentedLines, "\n")
+    }
+
+    scripts = append(scripts, SieveScript{
+        Name:    flt.Filtername,
+        Content: content,
+    })
+    continue
+}
+
+
 
         cond, condUsesBody := buildConditions(flt.Rules)
         if condUsesBody {
@@ -98,13 +117,35 @@ func ConvertFilters(f Filter) []SieveScript {
             }
         }
 
-        sb.WriteString("    stop;\n")
-        sb.WriteString("}\n")
 
-        scripts = append(scripts, SieveScript{
-            Name:    flt.Filtername,
-            Content: sb.String(),
-        })
+sb.WriteString("    stop;\n")
+sb.WriteString("}\n")
+
+content := sb.String()
+
+// If the filter was disabled in cPanel, keep it but comment it out
+// so it does not run on the target system.
+if flt.Enabled == 0 {
+    var commentedLines []string
+    commentedLines = append(commentedLines,
+        fmt.Sprintf("// NOTE: this filter was disabled in cPanel (enabled=%d)", flt.Enabled),
+    )
+    for _, line := range strings.Split(content, "\n") {
+        if strings.TrimSpace(line) == "" {
+            commentedLines = append(commentedLines, "")
+        } else {
+            commentedLines = append(commentedLines, "// "+line)
+        }
+    }
+    content = strings.Join(commentedLines, "\n")
+}
+
+scripts = append(scripts, SieveScript{
+    Name:    flt.Filtername,
+    Content: content,
+})
+
+
     }
 
     return scripts
@@ -177,13 +218,36 @@ func buildSingleCondition(r *Rule) (string, bool) {
     match := strings.ToLower(strings.TrimSpace(r.Match))
     val := r.Val
 
+
     // Regex-based matches are considered unsafe/unsupported — we drop them.
     if match == "matches_regex" || match == "does not match" {
         return fmt.Sprintf(
-            "true /* TODO: regex/does-not-match rule ignored (%s %q %s) */",
+            "false /* TODO: regex/does-not-match rule ignored (%s %q %s) */",
             r.Part, r.Match, r.Val,
         ), false
     }
+
+    // Special-case: cPanel "matches" often used as simple ^prefix regex,
+    // e.g. ^Suspended:  →  Subject starting with "Suspended:".
+    // We convert simple cases to Sieve :matches globs, otherwise fall back
+    // to a safe false condition.
+    if match == "matches" {
+        if glob, ok := simpleRegexToGlob(val); ok {
+            field := mapPart(part)
+            if field.kind == fieldBody {
+                cond := fmt.Sprintf(`body :matches %s`, quoteString(glob))
+                return cond, true
+            }
+            hdrExpr := field.headerExpr()
+            cond := fmt.Sprintf(`%s :matches %s %s`, field.test(), hdrExpr, quoteString(glob))
+            return cond, false
+        }
+        return fmt.Sprintf(
+            "false /* TODO: unsupported match %q on %s %q */",
+            r.Match, r.Part, r.Val,
+        ), false
+    }
+
 
     field := mapPart(part)
     op, negative, bodyPattern := mapMatch(match, val)
@@ -292,6 +356,45 @@ func mapPart(part string) fieldInfo {
         return fieldInfo{kind: fieldHeader, headers: []string{p}}
     }
 }
+
+
+
+
+// simpleRegexToGlob tries to convert very simple regex-like patterns
+// into Sieve :matches globs. Examples:
+//   "^Suspended:"       -> "Suspended:*"
+//   "^Suspended:$"      -> "Suspended:"
+//   "Suspended:$"       -> "*Suspended:"
+// Anything containing real regex meta chars is rejected.
+func simpleRegexToGlob(pattern string) (string, bool) {
+    if pattern == "" {
+        return "", false
+    }
+    // if it has typical regex meta, bail out
+    if strings.ContainsAny(pattern, `.*+?[]()|\`) {
+        return "", false
+    }
+
+    // ^prefix$
+    if strings.HasPrefix(pattern, "^") && strings.HasSuffix(pattern, "$") && len(pattern) > 2 {
+        core := pattern[1 : len(pattern)-1]
+        return core, true
+    }
+    // ^prefix
+    if strings.HasPrefix(pattern, "^") && len(pattern) > 1 {
+        core := pattern[1:]
+        return core + "*", true
+    }
+    // suffix$
+    if strings.HasSuffix(pattern, "$") && len(pattern) > 1 {
+        core := pattern[:len(pattern)-1]
+        return "*" + core, true
+    }
+    return "", false
+}
+
+
+
 
 // mapMatch maps cPanel match -> (sieveOp, negative, pattern).
 func mapMatch(match, val string) (sieveOp string, negative bool, bodyPattern string) {
