@@ -3,6 +3,7 @@ package cpanel
 import (
     "fmt"
     "io"
+    "io/fs"
     "os"
     "path/filepath"
 
@@ -16,7 +17,9 @@ import (
 // destDir/user/domain/localpart/localpart.sieve
 // destDir/user/domain/localpart/filter        (raw text filter, if exists)
 // destDir/user/domain/localpart/filter.yaml   (raw yaml filter, if exists)
-func ExportUser(user, destDir string) error {
+// destDir/user/domain/localpart/maildir/...   (optional Maildir copy, if withMaildir=true)
+
+func ExportUser(user, destDir string, withMaildir bool) error {
     homeDir, err := findHomeDir(user)
     if err != nil {
         return err
@@ -112,6 +115,19 @@ func ExportUser(user, destDir string) error {
                 continue
             }
 
+
+            // Optional: export Maildir for this mailbox
+            if withMaildir {
+                maildirSrc := filepath.Join(homeDir, "mail", domain, localpart)
+                maildirDst := filepath.Join(mboxOutDir, "maildir")
+                if dirExists(maildirSrc) {
+                    if err := copyDir(maildirSrc, maildirDst); err != nil {
+                        return fmt.Errorf("copy maildir for %s@%s: %w", localpart, domain, err)
+                    }
+                }
+            }
+
+
             scripts := sieve.ConvertFilters(f)
             if len(scripts) == 0 {
                 continue
@@ -146,6 +162,40 @@ func fileExists(path string) bool {
     fi, err := os.Stat(path)
     return err == nil && !fi.IsDir()
 }
+
+
+func dirExists(path string) bool {
+    fi, err := os.Stat(path)
+    return err == nil && fi.IsDir()
+}
+
+// copyDir αντιγράφει αναδρομικά έναν φάκελο (Maildir) από src σε dst.
+// - Δημιουργεί όλους τους ενδιάμεσους φακέλους.
+// - Αντιγράφει μόνο regular files (αγνοεί symlinks κλπ).
+func copyDir(src, dst string) error {
+    return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+        if err != nil {
+            return err
+        }
+
+        rel, err := filepath.Rel(src, path)
+        if err != nil {
+            return err
+        }
+        target := filepath.Join(dst, rel)
+
+        if d.IsDir() {
+            // Create directory in destination
+            return os.MkdirAll(target, 0755)
+        }
+
+        if !d.Type().IsRegular() {
+            return nil // skip non-regular files (symlinks, sockets, etc.)
+        }
+        return copyFile(path, target)
+    })
+}
+
 
 func copyFile(src, dst string) error {
     in, err := os.Open(src)

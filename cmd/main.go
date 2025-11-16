@@ -23,6 +23,7 @@ import (
 func main() {
     account := flag.String("account", "", "Alias for -cpanel-user (cPanel account)")
     dest := flag.String("dest", "./backup", "Destination folder for sieve scripts")
+    withMaildir := flag.Bool("maildir", false, "Also export Maildir contents for each mailbox")
     path := flag.String("path", "", "Convert a single filter.yaml or filter file")
     cpUser := flag.String("cpanel-user", "", "Export filters for a cPanel account (domains + mailboxes)")
 
@@ -57,12 +58,14 @@ func main() {
         fmt.Fprintf(os.Stderr, "Modes (choose one):\n")
         fmt.Fprintf(os.Stderr, "  -cpanel-user <user>   Export all filters for a cPanel account\n")
         fmt.Fprintf(os.Stderr, "  -account <user>       Alias for -cpanel-user (same as above)\n")
+        fmt.Fprintf(os.Stderr, "    (optional: -maildir to also export Maildir contents)\n")
         fmt.Fprintf(os.Stderr, "  -path <file>          Convert a single filter.yaml or filter file\n")
         fmt.Fprintf(os.Stderr, "  -import-sieve         Import Sieve scripts from a backup using doveadm\n\n")
         fmt.Fprintf(os.Stderr, "  -create-mailcow-mailboxes   Create mailcow mailboxes from a backup tree\n\n")
 
         fmt.Fprintf(os.Stderr, "Export example:\n")
         fmt.Fprintf(os.Stderr, "./exim2sieve -cpanel-user myipgr -dest ./backup\n")
+        fmt.Fprintf(os.Stderr, "./exim2sieve -cpanel-user myipgr -dest ./backup -maildir\n")
         fmt.Fprintf(os.Stderr, "Import example:\n")
         fmt.Fprintf(os.Stderr, "./exim2sieve -config exim2sieve.conf  -import-sieve -backup ./backup/myipgr -domain myip.gr \n")
         fmt.Fprintf(os.Stderr, "Mailcow mailboxes example:\n")
@@ -151,7 +154,7 @@ func main() {
         if modeSingleFile {
             log.Fatal("-cpanel-user/-account cannot be combined with -path")
         }
-        if err := cpanel.ExportUser(*cpUser, *dest); err != nil {
+        if err := cpanel.ExportUser(*cpUser, *dest, *withMaildir); err != nil {
             log.Fatal(err)
         }
         return
