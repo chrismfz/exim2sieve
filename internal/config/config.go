@@ -11,13 +11,18 @@ import (
 
 type Config struct {
 
-    DoveadmCmd    []string // e.g. {"doveadm"} or {"docker", "exec", "-i", "...", "doveadm"}
+    DoveadmCmd []string // e.g. {"doveadm"} or {"docker", "exec", "-i", "...", "doveadm"}
 
     // Mailcow API integration (optional, used by mailcow-related modes)
     MailcowAPIURL  string
     MailcowAPIKey  string
     MailcowQuotaMB int // default quota per mailbox in MB
 
+    // Maildir path mapping (optional, mainly for Docker):
+    // - On bare metal / DirectAdmin: leave empty → host paths used as-is.
+    // - On Docker (mailcow): set host base + container base for Maildir backups.
+    MaildirHostBase      string
+    MaildirContainerBase string
 
 }
 
@@ -56,8 +61,10 @@ func Load(path string) (*Config, error) {
 
     // Fallback: assume plain "doveadm" in PATH.
     return &Config{
-        DoveadmCmd: []string{"doveadm"},
-        MailcowQuotaMB: 5120, // 5GB default
+        DoveadmCmd:         []string{"doveadm"},
+        MailcowQuotaMB:     5120, // 5GB default
+        MaildirHostBase:      "",
+        MaildirContainerBase: "",
     }, nil
 }
 
@@ -70,8 +77,10 @@ func loadFrom(path string) (*Config, error) {
 
     scanner := bufio.NewScanner(f)
     cfg := &Config{
-        DoveadmCmd:    []string{"doveadm"},
-        MailcowQuotaMB: 5120, // sensible default
+        DoveadmCmd:         []string{"doveadm"},
+        MailcowQuotaMB:     5120, // sensible default
+        MaildirHostBase:      "",
+        MaildirContainerBase: "",
     }
 
     currentSection := ""
@@ -116,6 +125,19 @@ func loadFrom(path string) (*Config, error) {
                 if mb, err := parseQuotaMB(val); err == nil {
                     cfg.MailcowQuotaMB = mb
                 }
+
+
+            }
+        case "paths":
+            switch key {
+            case "maildir_host_base":
+                // e.g. /root/chris/backup
+                cfg.MaildirHostBase = strings.TrimRight(val, "/")
+            case "maildir_container_base":
+                // e.g. /backup (inside docker container)
+                cfg.MaildirContainerBase = strings.TrimRight(val, "/")
+
+
             }
         }
     }

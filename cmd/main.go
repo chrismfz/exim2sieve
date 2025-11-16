@@ -29,8 +29,10 @@ func main() {
 
     // Import-related flags
     importSieve := flag.Bool("import-sieve", false, "Import Sieve scripts from a backup using doveadm")
+    importMaildir := flag.Bool("import-maildir", false, "Import Maildir messages from a backup using doveadm")
     backupRoot := flag.String("backup", "", "Backup root for -import-sieve (e.g. ./backup/myipgr)")
     domain := flag.String("domain", "", "Limit -import-sieve to a specific domain (optional)")
+    mailbox := flag.String("mailbox", "","Limit import to a single mailbox (localpart or full address, e.g. 'chris' or 'chris@myip.gr')")
     configPath := flag.String("config", "", "Path to exim2sieve.conf (optional)")
 
     // Mailcow-related flags (mailbox creation via API)
@@ -46,12 +48,13 @@ func main() {
     // Decide mode
     modeExportUser := (*cpUser != "")
     modeSingleFile := (*path != "")
-    modeImport := *importSieve
+    modeImportSieve := *importSieve
+    modeImportMaildir := *importMaildir
     modeMailcow := *createMailcow
 
 
     // If no mode flags are provided, show help and exit.
-    if !modeExportUser && !modeSingleFile && !modeImport && !modeMailcow {
+    if !modeExportUser && !modeSingleFile && !modeImportSieve && !modeImportMaildir && !modeMailcow {
         fmt.Fprintf(os.Stderr, "exim2sieve – convert cPanel Exim filters to Sieve\n\n")
         fmt.Fprintf(os.Stderr, "Usage:\n")
         fmt.Fprintf(os.Stderr, "  %s [flags]\n\n", os.Args[0])
@@ -60,7 +63,8 @@ func main() {
         fmt.Fprintf(os.Stderr, "  -account <user>       Alias for -cpanel-user (same as above)\n")
         fmt.Fprintf(os.Stderr, "    (optional: -maildir to also export Maildir contents)\n")
         fmt.Fprintf(os.Stderr, "  -path <file>          Convert a single filter.yaml or filter file\n")
-        fmt.Fprintf(os.Stderr, "  -import-sieve         Import Sieve scripts from a backup using doveadm\n\n")
+        fmt.Fprintf(os.Stderr, "  -import-sieve         Import Sieve scripts from a backup using doveadm\n")
+        fmt.Fprintf(os.Stderr, "  -import-maildir       Import Maildir messages from a backup using doveadm\n\n")
         fmt.Fprintf(os.Stderr, "  -create-mailcow-mailboxes   Create mailcow mailboxes from a backup tree\n\n")
 
         fmt.Fprintf(os.Stderr, "Export example:\n")
@@ -68,6 +72,9 @@ func main() {
         fmt.Fprintf(os.Stderr, "./exim2sieve -cpanel-user myipgr -dest ./backup -maildir\n")
         fmt.Fprintf(os.Stderr, "Import example:\n")
         fmt.Fprintf(os.Stderr, "./exim2sieve -config exim2sieve.conf  -import-sieve -backup ./backup/myipgr -domain myip.gr \n")
+        fmt.Fprintf(os.Stderr, "./exim2sieve -config exim2sieve.conf  -import-maildir -backup ./backup/myipgr -domain myip.gr\n")
+        fmt.Fprintf(os.Stderr, "  (use -mailbox chris or -mailbox chris@myip.gr to limit to a single mailbox)\n")
+
         fmt.Fprintf(os.Stderr, "Mailcow mailboxes example:\n")
         fmt.Fprintf(os.Stderr, "./exim2sieve -config exim2sieve.conf -create-mailcow-mailboxes -backup ./backup/myipgr -domain myip.gr\n")
 
@@ -87,7 +94,10 @@ func main() {
         activeModes++
     }
 
-    if modeImport {
+    if modeImportSieve {
+        activeModes++
+    }
+    if modeImportMaildir {
         activeModes++
     }
 
@@ -96,11 +106,12 @@ func main() {
     }
 
     if activeModes > 1 {
-        log.Fatal("Only one of -cpanel-user/-account, -path, or -import-sieve can be used at a time")
+        log.Fatal("Only one of -cpanel-user/-account, -path, -import-sieve, or -import-maildir can be used at a time")
+
     }
 
-    //  Import mode: use doveadm to load Sieve into Dovecot
-    if modeImport {
+    //  Import Sieve mode: use doveadm to load Sieve into Dovecot
+    if modeImportSieve {
         if *backupRoot == "" {
             log.Fatal("-backup is required with -import-sieve")
         }
@@ -112,10 +123,44 @@ func main() {
         ic := importer.ImportConfig{
             BackupRoot: *backupRoot,
             Domain:     *domain,
+            Mailbox:    *mailbox,
             DoveadmCmd: cfg.DoveadmCmd,
+            // Maildir mapping is not used by ImportSieve directly,
+            // but we keep the config unified.
+            MaildirHostBase:      cfg.MaildirHostBase,
+            MaildirContainerBase: cfg.MaildirContainerBase,
         }
 
         if err := importer.ImportSieve(ic); err != nil {
+            log.Fatal(err)
+        }
+        return
+    }
+
+
+
+    //  Import Maildir mode: use doveadm import to load messages
+    if modeImportMaildir {
+        if *backupRoot == "" {
+            log.Fatal("-backup is required with -import-maildir")
+        }
+        cfg, err := config.Load(*configPath)
+        if err != nil {
+            log.Fatalf("Cannot load config: %v", err)
+        }
+
+        ic := importer.ImportConfig{
+            BackupRoot: *backupRoot,
+            Domain:     *domain,
+            Mailbox:    *mailbox,
+            DoveadmCmd: cfg.DoveadmCmd,
+            // These two allow host→container mapping for Maildir imports.
+            // On non-docker systems leave them empty in the config.
+            MaildirHostBase:      cfg.MaildirHostBase,
+            MaildirContainerBase: cfg.MaildirContainerBase,
+        }
+
+        if err := importer.ImportMaildir(ic); err != nil {
             log.Fatal(err)
         }
         return

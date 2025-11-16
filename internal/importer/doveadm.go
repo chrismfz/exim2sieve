@@ -15,7 +15,13 @@ import (
 type ImportConfig struct {
     BackupRoot string   // e.g. "./backup/myipgr"
     Domain     string   // optional: only this domain (e.g. "myip.gr")
+    Mailbox    string   // optional: only this mailbox (localpart or full addr)
     DoveadmCmd []string // e.g. {"doveadm"} or {"docker","exec","-i","ctr","doveadm"}
+
+    // Optional Maildir path mapping (mainly for ImportMaildir, but kept here
+    // for a unified config object).
+    MaildirHostBase, MaildirContainerBase string
+
 }
 
 // ImportSieve walks the backup tree and imports Sieve scripts using doveadm.
@@ -72,16 +78,24 @@ func ImportSieve(cfg ImportConfig) error {
             }
 
             userDir := filepath.Join(domainPath, uname)
+            addr := uname + "@" + domain
+
+            // Αν έχεις δώσει -mailbox, φιλτράρουμε εδώ:
+            //   -mailbox chris        => ταιριάζει uname == "chris"
+            //   -mailbox chris@myip.gr => ταιριάζει addr == "chris@myip.gr"
+            if cfg.Mailbox != "" && cfg.Mailbox != addr && cfg.Mailbox != uname {
+                continue
+            }
 
             // Find a .sieve file inside userDir (prefer <user>.sieve)
             sievePath, scriptName, err := findSieveFile(userDir, uname)
+
             if err != nil {
-                log.Printf("INFO: no Sieve script for %s@%s: %v", uname, domain, err)
+                log.Printf("INFO: no Sieve script for %s: %v", addr, err)
                 skipped++
                 continue
             }
 
-            addr := uname + "@" + domain
 
             exists, err := doveadmUserExists(cfg.DoveadmCmd, addr)
             if err != nil {
