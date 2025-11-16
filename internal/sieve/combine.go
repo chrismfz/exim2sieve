@@ -5,6 +5,25 @@ import (
     "sort"
     "strings"
 )
+// sanitizeRuleName καθαρίζει το όνομα του φίλτρου ώστε να είναι ασφαλές
+// για χρήση μέσα στο σχόλιο "# rule:[...]" που διαβάζει το Roundcube.
+func sanitizeRuleName(name string) string {
+    s := strings.TrimSpace(name)
+
+    // Αφαίρεση / αντικατάσταση ύποπτων χαρακτήρων
+    s = strings.ReplaceAll(s, "\r", " ")
+    s = strings.ReplaceAll(s, "\n", " ")
+
+    // Το ']' κλείνει το [...] και μπορεί να μπερδέψει το Roundcube,
+    // οπότε το αντικαθιστούμε π.χ. με ')'.
+    s = strings.ReplaceAll(s, "]", ")")
+
+    if s == "" {
+        s = "(unnamed)"
+    }
+    return s
+}
+
 
 // CombineScripts merges many SieveScript objects into a single script:
 //
@@ -48,7 +67,15 @@ func CombineScripts(name string, scripts []SieveScript) SieveScript {
             continue
         }
 
-        bodyChunks = append(bodyChunks, fmt.Sprintf("# Filter: %s", sc.Name))
+        // Roundcube-compatible rule name:
+
+        safeName := sanitizeRuleName(sc.Name)
+
+        // Roundcube-compatible rule name:
+        bodyChunks = append(bodyChunks, fmt.Sprintf("# rule:[%s]", safeName))
+        // name as it was in comment
+        bodyChunks = append(bodyChunks, fmt.Sprintf("# Filter: %s", safeName))
+
         bodyChunks = append(bodyChunks, content)
         bodyChunks = append(bodyChunks, "") // blank line between filters
     }
