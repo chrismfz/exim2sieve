@@ -42,6 +42,18 @@ func ExportUser(user, destDir string, withMaildir bool) error {
             return fmt.Errorf("mkdir %s: %w", domainOutDir, err)
         }
 
+        // ── 0) Copy cPanel shadow file for this domain (password hashes) ──
+        // /home/<user>/etc/<domain>/shadow → dest/user/domain/shadow
+        domainEtcDir := filepath.Join(etcRoot, domain)
+        shadowPath := filepath.Join(domainEtcDir, "shadow")
+        if fileExists(shadowPath) {
+            _ = copyFile(shadowPath, filepath.Join(domainOutDir, "shadow"))
+        }
+
+
+
+
+
         // ── 1) Domain-wide filter: /etc/vfilters/<domain> ─────────────
         vfilterPath := filepath.Join("/etc/vfilters", domain)
         if fileExists(vfilterPath) {
@@ -62,7 +74,6 @@ func ExportUser(user, destDir string, withMaildir bool) error {
         }
 
         // ── 2) Per-mailbox filters under /home*/user/etc/<domain>/localpart/ ──
-        domainEtcDir := filepath.Join(etcRoot, domain)
         mboxEntries, err := os.ReadDir(domainEtcDir)
         if err != nil {
             // If etc/<domain> disappeared, skip
