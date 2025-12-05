@@ -495,6 +495,22 @@ Please open an issue or PR on GitHub with a clear description and, if possible, 
 
 ---
 
-## License
 
-MIT License
+Usage flow
+
+1. Export from cPanel (creates backup + shadow under per-domain dirs):
+./exim2sieve -cpanel-user mycpuser -dest ./backup -maildir
+# → ./backup/mycpuser/<domain>/shadow
+
+2. Create mailboxes in Mailcow via API:
+./exim2sieve -config exim2sieve.conf \
+  -create-mailcow-mailboxes \
+  -backup ./backup/mycpuser \
+  -domain myip.gr
+
+3. Patch passwords from shadow into Mailcow MySQL:
+./exim2sieve -config exim2sieve.conf \
+  -mailcow-passwords-from-shadow \
+  -backup ./backup/mycpuser \
+  -domain myip.gr
+

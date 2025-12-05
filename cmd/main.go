@@ -38,6 +38,11 @@ func main() {
     // Mailcow-related flags (mailbox creation via API)
     createMailcow := flag.Bool("create-mailcow-mailboxes", false,
         "Create mailcow mailboxes from a backup tree (uses [mailcow] config)")
+
+    // Mailcow MySQL password update (from cPanel shadow)
+    mailcowPwFromShadow := flag.Bool("mailcow-passwords-from-shadow", false,
+        "Update mailcow mailbox passwords from cPanel shadow file in backup (uses [mailcow] DB config)")
+
     flag.Parse()
 
     // Make -account act as a shortcut for -cpanel-user
@@ -52,9 +57,11 @@ func main() {
     modeImportMaildir := *importMaildir
     modeMailcow := *createMailcow
 
+    modeMailcowPw := *mailcowPwFromShadow
+
 
     // If no mode flags are provided, show help and exit.
-    if !modeExportUser && !modeSingleFile && !modeImportSieve && !modeImportMaildir && !modeMailcow {
+    if !modeExportUser && !modeSingleFile && !modeImportSieve && !modeImportMaildir && !modeMailcow && !modeMailcowPw {
         fmt.Fprintf(os.Stderr, "exim2sieve – convert cPanel Exim filters to Sieve\n\n")
         fmt.Fprintf(os.Stderr, "Usage:\n")
         fmt.Fprintf(os.Stderr, "  %s [flags]\n\n", os.Args[0])
@@ -65,7 +72,9 @@ func main() {
         fmt.Fprintf(os.Stderr, "  -path <file>          Convert a single filter.yaml or filter file\n")
         fmt.Fprintf(os.Stderr, "  -import-sieve         Import Sieve scripts from a backup using doveadm\n")
         fmt.Fprintf(os.Stderr, "  -import-maildir       Import Maildir messages from a backup using doveadm\n\n")
-        fmt.Fprintf(os.Stderr, "  -create-mailcow-mailboxes   Create mailcow mailboxes from a backup tree\n\n")
+        fmt.Fprintf(os.Stderr, "  -create-mailcow-mailboxes   Create mailcow mailboxes from a backup tree (Mailcow API)\n")
+        fmt.Fprintf(os.Stderr, "  -mailcow-passwords-from-shadow  Update Mailcow mailbox.password from cPanel shadow (MySQL)\n\n")
+
 
         fmt.Fprintf(os.Stderr, "Export example:\n")
         fmt.Fprintf(os.Stderr, "./exim2sieve -cpanel-user myipgr -dest ./backup\n")
@@ -77,6 +86,9 @@ func main() {
 
         fmt.Fprintf(os.Stderr, "Mailcow mailboxes example:\n")
         fmt.Fprintf(os.Stderr, "./exim2sieve -config exim2sieve.conf -create-mailcow-mailboxes -backup ./backup/myipgr -domain myip.gr\n")
+
+        fmt.Fprintf(os.Stderr, "Mailcow passwords from shadow example:\n")
+        fmt.Fprintf(os.Stderr, "./exim2sieve -config exim2sieve.conf -mailcow-passwords-from-shadow -backup ./backup/myipgr -domain myip.gr\n")
 
 
 
@@ -105,9 +117,12 @@ func main() {
         activeModes++
     }
 
-    if activeModes > 1 {
-        log.Fatal("Only one of -cpanel-user/-account, -path, -import-sieve, or -import-maildir can be used at a time")
+    if modeMailcowPw {
+        activeModes++
+    }
 
+    if activeModes > 1 {
+        log.Fatal("Only one mode can be used at a time (-cpanel-user/-account, -path, -import-sieve, -import-maildir, -create-mailcow-mailboxes, -mailcow-passwords-from-shadow)")
     }
 
     //  Import Sieve mode: use doveadm to load Sieve into Dovecot
@@ -190,6 +205,23 @@ func main() {
     }
 
 
+
+    //  Mailcow password update mode (MySQL, using cPanel shadow from backup)
+    if modeMailcowPw {
+        if *backupRoot == "" {
+            log.Fatal("-backup is required with -mailcow-passwords-from-shadow")
+        }
+
+        cfg, err := config.Load(*configPath)
+        if err != nil {
+            log.Fatalf("Cannot load config: %v", err)
+        }
+
+        if err := mailcow.UpdatePasswordsFromShadow(cfg, *backupRoot, *domain); err != nil {
+            log.Fatal(err)
+        }
+        return
+    }
 
 
 

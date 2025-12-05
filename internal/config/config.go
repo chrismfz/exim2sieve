@@ -18,6 +18,14 @@ type Config struct {
     MailcowAPIKey  string
     MailcowQuotaMB int // default quota per mailbox in MB
 
+    // Mailcow MySQL settings (optional, used by password update mode)
+    MailcowDBHost string // e.g. 127.0.0.1
+    MailcowDBPort string // e.g. 13306
+    MailcowDBUser string // e.g. mailcow
+    MailcowDBPass string
+    MailcowDBName string // e.g. mailcow
+
+
     // Maildir path mapping (optional, mainly for Docker):
     // - On bare metal / DirectAdmin: leave empty → host paths used as-is.
     // - On Docker (mailcow): set host base + container base for Maildir backups.
@@ -65,6 +73,13 @@ func Load(path string) (*Config, error) {
         MailcowQuotaMB:     5120, // 5GB default
         MaildirHostBase:      "",
         MaildirContainerBase: "",
+
+        // Default Mailcow DB settings – override in [mailcow] if needed
+        MailcowDBHost: "127.0.0.1",
+        MailcowDBPort: "13306",
+        MailcowDBUser: "mailcow",
+        MailcowDBName: "mailcow",
+
     }, nil
 }
 
@@ -81,6 +96,12 @@ func loadFrom(path string) (*Config, error) {
         MailcowQuotaMB:     5120, // sensible default
         MaildirHostBase:      "",
         MaildirContainerBase: "",
+
+        MailcowDBHost: "127.0.0.1",
+        MailcowDBPort: "13306",
+        MailcowDBUser: "mailcow",
+        MailcowDBName: "mailcow",
+
     }
 
     currentSection := ""
@@ -125,6 +146,26 @@ func loadFrom(path string) (*Config, error) {
                 if mb, err := parseQuotaMB(val); err == nil {
                     cfg.MailcowQuotaMB = mb
                 }
+
+            case "db_host":
+                if val != "" {
+                    cfg.MailcowDBHost = val
+                }
+            case "db_port":
+                if val != "" {
+                    cfg.MailcowDBPort = val
+                }
+            case "db_user":
+                if val != "" {
+                    cfg.MailcowDBUser = val
+                }
+            case "db_pass":
+                cfg.MailcowDBPass = val
+            case "db_name":
+                if val != "" {
+                    cfg.MailcowDBName = val
+                }
+
 
 
             }
@@ -181,4 +222,29 @@ func parseQuotaMB(val string) (int, error) {
         return 0, fmt.Errorf("parseQuotaMB(%q): %w", val, err)
     }
     return n * mult, nil
+}
+
+// MailcowDSN builds a MySQL DSN suitable for database/sql + go-sql-driver/mysql.
+func (c *Config) MailcowDSN() string {
+	host := strings.TrimSpace(c.MailcowDBHost)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port := strings.TrimSpace(c.MailcowDBPort)
+	if port == "" {
+		port = "3306"
+	}
+	user := strings.TrimSpace(c.MailcowDBUser)
+	if user == "" {
+		user = "mailcow"
+	}
+	name := strings.TrimSpace(c.MailcowDBName)
+	if name == "" {
+		name = "mailcow"
+	}
+	pass := c.MailcowDBPass
+
+	// mailcow:pass@tcp(127.0.0.1:13306)/mailcow?parseTime=true&charset=utf8mb4
+	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&charset=utf8mb4,utf8&loc=Local",
+		user, pass, host, port, name)
 }

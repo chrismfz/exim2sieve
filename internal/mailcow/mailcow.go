@@ -3,7 +3,9 @@ package mailcow
 
 import (
 	"bytes"
+	"bufio"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"exim2sieve/internal/config"
+	 _ "github.com/go-sql-driver/mysql"
 )
 
 type Client struct {
@@ -356,6 +359,117 @@ func CreateMailboxesFromBackup(c *Client, backupRoot, domainFilter string, logWr
 				pw,
 			)
 		}
+	}
+
+	return nil
+}
+
+
+/////// mysql //////
+// UpdatePasswordsFromShadow walks a backup tree (./backup/<cpuser>) and for each
+// domain/<shadow> file updates mailcow.mailbox.password with the hashes from cPanel.
+//
+// backupRoot typically looks like:
+//   ./backup/mycpuser/myip.gr/shadow
+//   ./backup/mycpuser/myip.gr/chris/...
+//
+// If domainFilter is non-empty, only that domain is processed.
+func UpdatePasswordsFromShadow(cfg *config.Config, backupRoot, domainFilter string) error {
+	dsn := cfg.MailcowDSN()
+	if dsn == "" {
+		return fmt.Errorf("mailcow MySQL DSN not configured")
+	}
+
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return fmt.Errorf("open mysql: %w", err)
+	}
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		return fmt.Errorf("ping mysql: %w", err)
+	}
+
+	entries, err := os.ReadDir(backupRoot)
+	if err != nil {
+		return fmt.Errorf("read backup root %s: %w", backupRoot, err)
+	}
+
+	for _, ent := range entries {
+		if !ent.IsDir() {
+			continue
+		}
+		domain := ent.Name()
+		if domainFilter != "" && domain != domainFilter {
+			continue
+		}
+
+		domainDir := filepath.Join(backupRoot, domain)
+		shadowPath := filepath.Join(domainDir, "shadow")
+
+		f, err := os.Open(shadowPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// No shadow for this domain, skip quietly
+				continue
+			}
+			log.Printf("mailcow: open shadow %s: %v", shadowPath, err)
+			continue
+		}
+
+		log.Printf("mailcow: updating passwords for domain %s from %s", domain, shadowPath)
+
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+
+			parts := strings.Split(line, ":")
+			if len(parts) < 2 {
+				continue
+			}
+			localPart := parts[0]
+			rawHash := parts[1]
+			if rawHash == "" {
+				continue
+			}
+
+			var scheme string
+			switch {
+			case strings.HasPrefix(rawHash, "$6$"):
+				scheme = "{SHA512-CRYPT}"
+			case strings.HasPrefix(rawHash, "$1$"):
+				scheme = "{MD5-CRYPT}"
+			default:
+				log.Printf("mailcow: unsupported shadow hash for %s@%s: %s", localPart, domain, rawHash)
+				continue
+			}
+
+			password := scheme + rawHash
+			username := fmt.Sprintf("%s@%s", localPart, domain)
+
+			res, err := db.Exec(`UPDATE mailbox SET password = ? WHERE username = ?`, password, username)
+			if err != nil {
+				log.Printf("mailcow: UPDATE mailbox.password for %s failed: %v", username, err)
+				continue
+			}
+
+			affected, _ := res.RowsAffected()
+			if affected == 0 {
+				log.Printf("mailcow: no mailbox row for %s (skipping)", username)
+				continue
+			}
+
+			log.Printf("mailcow: updated password for %s (scheme %s)", username, scheme)
+		}
+
+		if err := scanner.Err(); err != nil {
+			log.Printf("mailcow: reading shadow %s: %v", shadowPath, err)
+		}
+
+		_ = f.Close()
 	}
 
 	return nil
